@@ -1,0 +1,18 @@
+DIR=songs
+
+get_duration() {
+    ffprobe $1 -v quiet -show_entries format=duration -hide_banner | awk -F'=' '$1 = /duration/ {print $2}'
+}
+
+
+for song_dir in $(ls -d $DIR/*/); do
+
+    durations_path="${song_dir}durations.txt"
+
+    rm $durations_path
+
+    for ts_file in $(ls $song_dir*.ts); do
+        duration=$(get_duration $ts_file)
+        echo $(basename $ts_file) $duration >> $durations_path
+    done
+done
