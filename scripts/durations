@@ -9,7 +9,7 @@ for song_dir in $(ls -d $DIR/*/); do
 
     durations_path="${song_dir}durations.txt"
 
-    rm $durations_path
+    rm -f $durations_path
 
     for ts_file in $(ls $song_dir*.ts); do
         duration=$(get_duration $ts_file)
