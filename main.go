@@ -18,8 +18,14 @@ import (
 )
 
 var durations map[string]float64
-
 var sessions map[string]*Session
+
+type CreditChange struct {
+	SessionID string
+	Amount    int
+}
+
+var creditChanges chan *CreditChange
 
 func main() {
 	// configure the songs directory name and port
@@ -32,6 +38,12 @@ func main() {
 	}
 
 	sessions = map[string]*Session{}
+
+	sessions[uuid.Nil.String()] = &Session{
+		Id:      &uuid.Nil,
+		Credits: 50,
+	}
+
 	durations = map[string]float64{}
 
 	for _, durationFilePath := range durationFiles {
@@ -80,6 +92,10 @@ func main() {
 	fmt.Printf("Starting server on %v\n", port)
 	log.Printf("Serving %s on HTTP port: %v\n", songsDir, port)
 
+	creditChanges = make(chan *CreditChange)
+
+	go creditManager(creditChanges)
+
 	// serve and log errors
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%v", port), r))
 }
@@ -91,16 +107,24 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasSuffix(r.URL.String(), ".ts") {
 
-		_, ok := sessions[sessionID]
+		session, ok := sessions[sessionID]
 		if !ok {
 			http.Error(w, http.StatusText(404), 404)
 			return
 		}
 
 		duration := durations[stream]
-		satsPerSecond := 0.5
+		satsPerSecond := 1.0
 		cost := duration * satsPerSecond
+
+		if session.Credits < int(cost) {
+			http.Error(w, http.StatusText(403), 403)
+			return
+		}
+
 		log.Printf("%v %g seconds at %g costs %g", r.URL, duration, satsPerSecond, cost)
+
+		creditChanges <- &CreditChange{SessionID: sessionID, Amount: int(-1.0 * cost)}
 	}
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
@@ -123,6 +147,19 @@ func sessionGetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, http.StatusText(404), 404)
+}
+
+func creditManager(creditChanges chan *CreditChange) {
+	for change := range creditChanges {
+		session, ok := sessions[change.SessionID]
+		if !ok {
+			continue
+		}
+
+		session.Credits += change.Amount
+
+		log.Println(session)
+	}
 }
 
 type Session struct {
