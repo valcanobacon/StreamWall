@@ -1,81 +1,54 @@
 package main
 
 import (
-	"bufio"
+	"context"
+	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
-	"path"
-	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
 	"github.com/google/uuid"
+	"github.com/lightningnetwork/lnd/lnrpc"
+	"github.com/lightningnetwork/lnd/macaroons"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"gopkg.in/macaroon.v2"
+
+	"github.com/valcanobacon/StreamWall/money"
+	"github.com/valcanobacon/StreamWall/music"
 )
 
 var durations map[string]float64
-var sessions map[string]*Session
+var bank *money.Bank
 
-type CreditChange struct {
-	SessionID string
-	Amount    int
-}
-
-var creditChanges chan *CreditChange
+var (
+	macFile    = flag.String("macaroon", "readonly.macaroon", "The file container the macaroon")
+	tlsFile    = flag.String("tls-cert-file", "tls.cert", "The file container the cert file")
+	serverAddr = flag.String("addr", "localhost:10009", "The server address in the format of host:port")
+	//serverPort = flag.Int("port", 10009)
+)
 
 func main() {
+	flag.Parse()
+
 	// configure the songs directory name and port
 	const songsDir = "songs"
 	const port = 8080
 
-	durationFiles, err := filepath.Glob("songs/*/durations.txt")
-	if err != nil {
-		log.Fatal(err)
-	}
+	bank = money.NewBank()
+	bank.SetSession(uuid.Nil, 50)
 
-	sessions = map[string]*Session{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	sessions[uuid.Nil.String()] = &Session{
-		Id:      &uuid.Nil,
-		Credits: 50,
-	}
+	go bank.ProcessTransactions(ctx)
 
-	durations = map[string]float64{}
-
-	for _, durationFilePath := range durationFiles {
-		durationFilePathWithoutPrefix := strings.Replace(durationFilePath, "songs/", "/", 1)
-		songDir, _ := path.Split(durationFilePathWithoutPrefix)
-		fmt.Println(songDir)
-
-		file, err := os.Open(durationFilePath)
-		if err != nil {
-			fmt.Println(err)
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			row := scanner.Text()
-			columns := strings.Split(row, " ")
-			if duration, err := strconv.ParseFloat(columns[1], 64); err == nil {
-				durations[songDir+columns[0]] = duration
-			} else {
-				fmt.Println(err)
-			}
-
-		}
-
-		if err := scanner.Err(); err != nil {
-			fmt.Println(err)
-		}
-
-		fmt.Println(durations)
-
-	}
+	durations = music.LoadDurations("songs/*/durations.txt")
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -92,12 +65,60 @@ func main() {
 	fmt.Printf("Starting server on %v\n", port)
 	log.Printf("Serving %s on HTTP port: %v\n", songsDir, port)
 
-	creditChanges = make(chan *CreditChange)
+	//_, err := credentials.NewClientTLSFromFile(data.Path(tlsFile))
+	tlsCert, err := credentials.NewClientTLSFromFile(*tlsFile, "")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	go creditManager(creditChanges)
+	macCred, err := macCredFromFile((*macFile))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(tlsCert),
+		grpc.WithPerRPCCredentials(macCred),
+	}
+
+	conn, err := grpc.Dial(*serverAddr, opts...)
+	if err != nil {
+		log.Fatalf("fail to dial: %v", err)
+	}
+	defer conn.Close()
+
+	pp := &money.PaymentProcessor{
+		Client: lnrpc.NewLightningClient(conn),
+		Bank:   bank,
+		Index:  0,
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	go pp.Run(ctx)
 
 	// serve and log errors
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%v", port), r))
+}
+
+func macCredFromFile(macFile string) (*macaroons.MacaroonCredential, error) {
+	macBytes, err := ioutil.ReadFile(macFile)
+	if err != nil {
+		return nil, err
+	}
+
+	mac := &macaroon.Macaroon{}
+	if err = mac.UnmarshalBinary(macBytes); err != nil {
+		return nil, err
+	}
+
+	macCred, err := macaroons.NewMacaroonCredential(mac)
+	if err != nil {
+		return nil, err
+	}
+
+	return &macCred, nil
 }
 
 func streamHandler(w http.ResponseWriter, r *http.Request) {
@@ -107,24 +128,29 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasSuffix(r.URL.String(), ".ts") {
 
-		session, ok := sessions[sessionID]
-		if !ok {
+		sid, err := uuid.Parse(chi.URLParam(r, "sessionID"))
+		if err != nil {
+			return
+		}
+
+		s := bank.GetSession(sid)
+		if s == nil {
 			http.Error(w, http.StatusText(404), 404)
 			return
 		}
 
 		duration := durations[stream]
 		satsPerSecond := 1.0
-		cost := duration * satsPerSecond
+		cost := int64(duration * satsPerSecond)
 
-		if session.Credits < int(cost) {
+		if s.Credits < cost {
 			http.Error(w, http.StatusText(403), 403)
 			return
 		}
 
 		log.Printf("%v %g seconds at %g costs %g", r.URL, duration, satsPerSecond, cost)
 
-		creditChanges <- &CreditChange{SessionID: sessionID, Amount: int(-1.0 * cost)}
+		bank.NewTransaction(sid, (-1 * cost))
 	}
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
@@ -134,44 +160,19 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func sessionCreateHandler(w http.ResponseWriter, r *http.Request) {
-	newId := uuid.New()
-	session := NewSession(&newId, 0)
-	sessions[session.Id.String()] = session
-	render.Render(w, r, session)
+	s := bank.NewSession()
+	render.Render(w, r, s)
 }
 
 func sessionGetHandler(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "sessionID")
-	if session, ok := sessions[sessionID]; ok {
-		render.Render(w, r, session)
+	sid, err := uuid.Parse(chi.URLParam(r, "sessionID"))
+	if err != nil {
+		http.Error(w, http.StatusText(400), 400)
+	}
+	s := bank.GetSession(sid)
+	if s == nil {
+		http.Error(w, http.StatusText(404), 404)
 		return
 	}
-	http.Error(w, http.StatusText(404), 404)
-}
-
-func creditManager(creditChanges chan *CreditChange) {
-	for change := range creditChanges {
-		session, ok := sessions[change.SessionID]
-		if !ok {
-			continue
-		}
-
-		session.Credits += change.Amount
-
-		log.Println(session)
-	}
-}
-
-type Session struct {
-	Id      *uuid.UUID `json:"id"`
-	Credits int        `json:"credits"`
-}
-
-func NewSession(id *uuid.UUID, credits int) *Session {
-	response := &Session{Id: id, Credits: credits}
-	return response
-}
-
-func (s *Session) Render(w http.ResponseWriter, r *http.Request) error {
-	return nil
+	render.Render(w, r, s)
 }

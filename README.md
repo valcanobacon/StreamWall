@@ -49,3 +49,15 @@ ffmpeg -i MakinBeans.mp3 -c:a libmp3lame -b:a 128k -map 0:0 -f segment -segment_
 ```
 curl -o src/lightning.proto -s https://raw.githubusercontent.com/lightningnetwork/lnd/master/lnrpc/lightning.proto
 ```
+
+```
+uuidgen | od -A n -t x1 | sed -z 's/[ \n]*//g' 
+33313436316162332d363839382d343837382d386561652d6332396534663435663236610a 
+```
+
+```
+PUBKEY="03f89a8fb040dff65733b335b9215d7f8836deac5e9e8b69f65039578f1b53b3ad"
+DATA=00000000-0000-0000-0000-000000000000
+RECORD=`echo $DATA | od -A n -t x1 | sed -z 's/[ \n]*//g'`
+lncli sendpayment --dest=$PUBKEY --amt=1 --keysend --data 123123=$RECORD
+```
