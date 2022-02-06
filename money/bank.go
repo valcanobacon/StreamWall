@@ -19,10 +19,10 @@ func NewBank() *Bank {
 	}
 }
 
-func (b *Bank) GetSession(id SessionID) *Session {
-	s, ok := b.sessions[id]
+func (b *Bank) GetSession(sid SessionID) *Session {
+	s, ok := b.sessions[sid]
 	if !ok {
-		return nil
+		return b.SetSession(sid, 0)
 	}
 	return s
 }
@@ -50,17 +50,17 @@ func (b *Bank) ProcessTransactions(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case t := <-b.transactions:
-			s, ok := b.sessions[t.SID]
-			if !ok {
+			s := b.GetSession((t.SID))
+			if s == nil {
 				continue
 			}
 
 			s.Credits += t.Amount
 
 			if t.Amount > 0 {
-				log.Printf("%s + %d = %d", s.Id.String(), t.Amount, s.Credits)
+				log.Printf("Bank %s + %d = %d", s.Id.String(), t.Amount, s.Credits)
 			} else if t.Amount < 0 {
-				log.Printf("%s - %d = %d", s.Id.String(), -1*t.Amount, s.Credits)
+				log.Printf("Bank %s - %d = %d", s.Id.String(), -1*t.Amount, s.Credits)
 			}
 		}
 	}

@@ -3,7 +3,6 @@ package music
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -11,16 +10,19 @@ import (
 	"strings"
 )
 
-func LoadDurations(fileGlob string) map[string]float64 {
-	durations := map[string]float64{}
+type FileDurations = map[string]float64
 
-	files, err := filepath.Glob(fileGlob)
+func LoadDurations(glob, prefix string) (map[string]float64, error) {
+	// filename -> durationInSeconds
+	durations := FileDurations{}
+
+	files, err := filepath.Glob(glob)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
 	for _, p := range files {
-		dir, _ := path.Split(strings.Replace(p, "songs/", "/", 1))
+		dir, _ := path.Split(strings.Replace(p, prefix, "/", 1))
 
 		file, err := os.Open(p)
 		if err != nil {
@@ -32,19 +34,16 @@ func LoadDurations(fileGlob string) map[string]float64 {
 		for scanner.Scan() {
 			row := scanner.Text()
 			columns := strings.Split(row, " ")
-			if duration, err := strconv.ParseFloat(columns[1], 64); err == nil {
-				durations[dir+columns[0]] = duration
-			} else {
-				fmt.Println(err)
+			if d, err := strconv.ParseFloat(columns[1], 64); err == nil {
+				durations[dir+columns[0]] = d
 			}
-
 		}
 
 		if err := scanner.Err(); err != nil {
-			fmt.Println(err)
+			return nil, err
 		}
 
 	}
 
-	return durations
+	return durations, nil
 }
